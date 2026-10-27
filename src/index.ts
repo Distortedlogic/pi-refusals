@@ -1,4 +1,4 @@
-import { lstat } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -15,16 +15,61 @@ function containsInvalidPreludeImport(text: string): boolean {
 	return [...text.matchAll(PRELUDE_IMPORT)].some((match) => /\bprelude\b/u.test(match[0].replace(PRELUDE_GLOB, "")));
 }
 
-function editAddsInvalidPreludeImport(input: Record<string, unknown>): boolean {
-	if (typeof input.path !== "string" || !input.path.endsWith(".rs")) return false;
-	if (typeof input.newText === "string" && containsInvalidPreludeImport(input.newText)) return true;
-	if (!Array.isArray(input.edits)) return false;
+type Replacement = { oldText: string; newText: string };
 
-	return input.edits.some((edit) => {
-		if (!edit || typeof edit !== "object" || Array.isArray(edit)) return false;
-		const newText = (edit as Record<string, unknown>).newText;
-		return typeof newText === "string" && containsInvalidPreludeImport(newText);
-	});
+function getReplacements(input: Record<string, unknown>): Replacement[] {
+	const replacements: Replacement[] = [];
+	if (Array.isArray(input.edits)) {
+		for (const edit of input.edits) {
+			if (!edit || typeof edit !== "object" || Array.isArray(edit)) continue;
+			const replacement = edit as Record<string, unknown>;
+			if (typeof replacement.oldText === "string" && typeof replacement.newText === "string") {
+				replacements.push({ oldText: replacement.oldText, newText: replacement.newText });
+			}
+		}
+	}
+	if (typeof input.oldText === "string" && typeof input.newText === "string") {
+		replacements.push({ oldText: input.oldText, newText: input.newText });
+	}
+	return replacements;
+}
+
+async function editCreatesInvalidPreludeImport(input: Record<string, unknown>, cwd: string): Promise<boolean> {
+	if (typeof input.path !== "string" || !input.path.endsWith(".rs")) return false;
+
+	const replacements = getReplacements(input);
+	if (replacements.length === 0) return false;
+	const invalidAddition = replacements.some(({ newText }) => containsInvalidPreludeImport(newText));
+
+	let content: string;
+	try {
+		content = await readFile(resolve(cwd, input.path), "utf8");
+	} catch {
+		return invalidAddition;
+	}
+	content = content.replace(/^\uFEFF/u, "").replace(/\r\n?/gu, "\n");
+
+	const matches: Array<Replacement & { index: number }> = [];
+	for (const replacement of replacements) {
+		const oldText = replacement.oldText.replace(/\r\n?/gu, "\n");
+		const newText = replacement.newText.replace(/\r\n?/gu, "\n");
+		const index = content.indexOf(oldText);
+		if (oldText.length === 0 || index < 0 || content.indexOf(oldText, index + oldText.length) >= 0) {
+			return invalidAddition;
+		}
+		matches.push({ oldText, newText, index });
+	}
+
+	matches.sort((left, right) => left.index - right.index);
+	for (let index = 1; index < matches.length; index += 1) {
+		const previous = matches[index - 1];
+		if (previous.index + previous.oldText.length > matches[index].index) return invalidAddition;
+	}
+
+	for (const match of matches.toReversed()) {
+		content = `${content.slice(0, match.index)}${match.newText}${content.slice(match.index + match.oldText.length)}`;
+	}
+	return containsInvalidPreludeImport(content);
 }
 
 async function pathExists(path: string, cwd: string): Promise<boolean> {
@@ -53,7 +98,7 @@ export default function (pi: ExtensionAPI) {
 				event.input.path.endsWith(".rs") &&
 				typeof event.input.content === "string" &&
 				containsInvalidPreludeImport(event.input.content)) ||
-			(event.toolName === "edit" && editAddsInvalidPreludeImport(event.input))
+			(event.toolName === "edit" && (await editCreatesInvalidPreludeImport(event.input, ctx.cwd)))
 		) {
 			return { block: true, reason: PRELUDE_REFUSAL };
 		}
