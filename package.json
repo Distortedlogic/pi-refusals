@@ -31,6 +31,9 @@
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "1.4.0"
 	},
+	"dependencies": {
+		"shell-quote": "1.12.0"
+	},
 	"devDependencies": {
 		"@biomejs/biome": "2.6.3",
 		"@earendil-works/pi-coding-agent": "1.4.0",
