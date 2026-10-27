@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+*.log
+*.tgz
+*.tsbuildinfo
+.DS_Store
+coverage/
+dist/
+node_modules/
+.pi/readcache/
+.pi/tmp/
+PRELOAD.md
+TREE.txt

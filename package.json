@@ -1,0 +1,40 @@
+{
+	"name": "pi-refusals",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"keywords": [
+		"pi-package"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/Distortedlogic/pi-refusals.git"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"scripts": {
+		"check": "npm run typecheck && npm run lint",
+		"format": "biome check --write .",
+		"lint": "biome check .",
+		"typecheck": "tsc --noEmit"
+	},
+	"files": [
+		"src",
+		"README.md"
+	],
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "1.4.0"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.6.3",
+		"@earendil-works/pi-coding-agent": "1.4.0",
+		"@types/node": "22.20.5",
+		"typescript": "7.0.2"
+	}
+}
