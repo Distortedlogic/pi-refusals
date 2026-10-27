@@ -1,18 +1,99 @@
+import { execFile } from "node:child_process";
 import { lstat, readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { promisify } from "node:util";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+const execFileAsync = promisify(execFile);
 
 const DISALLOWED_BASH_TOOL = /\b(?:awk|grep|rg|sed)\b/u;
 const PRELUDE_IMPORT = /(?:(?<=^)|(?<=[;\n]))[\t ]*(?:pub(?:\s*\([^)]*\))?\s+)?use\b[^;]*\bprelude\b[^;]*;/gmu;
 const PRELUDE_GLOB = /::\s*prelude\s*::\s*\*/gu;
+const PRELUDE_WORD = /\bprelude\b/u;
+const USE_ROOT = /\buse\s+(?:::)?([A-Za-z_][A-Za-z0-9_]*)\s*::/u;
 const COMMAND_REFUSAL = "Blocked: The system prompt disallows sed, awk, rg, and grep. Use an allowed tool instead.";
 const PRELUDE_REFUSAL =
-	"Blocked: The system prompt requires Rust prelude imports to use `::prelude::*` to avoid import churn.";
+	"Blocked: The system prompt requires repository cross-crate prelude imports to use `::prelude::*` to avoid import churn.";
 const WRITE_REFUSAL =
 	"Blocked: The system prompt says to use write only for new files. Use edit for this existing file.";
 
-function containsInvalidPreludeImport(text: string): boolean {
-	return [...text.matchAll(PRELUDE_IMPORT)].some((match) => /\bprelude\b/u.test(match[0].replace(PRELUDE_GLOB, "")));
+interface CargoTarget {
+	name: string;
+	kind: string[];
+}
+
+interface CargoPackage {
+	id: string;
+	manifest_path: string;
+	targets: CargoTarget[];
+}
+
+interface CargoMetadata {
+	packages: CargoPackage[];
+	workspace_members: string[];
+}
+
+const cargoMetadataCache = new Map<string, Promise<CargoMetadata | undefined>>();
+
+function containsPath(root: string, path: string): boolean {
+	const child = relative(root, path);
+	return child === "" || (child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child));
+}
+
+async function getCargoMetadata(cwd: string): Promise<CargoMetadata | undefined> {
+	let cached = cargoMetadataCache.get(cwd);
+	if (!cached) {
+		cached = (async () => {
+			try {
+				const { stdout } = await execFileAsync("cargo", ["metadata", "--no-deps", "--format-version", "1"], {
+					cwd,
+					encoding: "utf8",
+					timeout: 10_000,
+				});
+				return JSON.parse(String(stdout)) as CargoMetadata;
+			} catch {
+				return undefined;
+			}
+		})();
+		cargoMetadataCache.set(cwd, cached);
+	}
+	return cached;
+}
+
+async function getRepositoryCrates(cwd: string, path: string): Promise<Set<string>> {
+	const metadata = await getCargoMetadata(cwd);
+	if (!metadata) return new Set();
+
+	const memberIds = new Set(metadata.workspace_members);
+	const packages = metadata.packages.filter((pkg) => memberIds.has(pkg.id));
+	const absolutePath = resolve(cwd, path);
+	let currentPackage: CargoPackage | undefined;
+
+	for (const pkg of packages) {
+		const root = dirname(pkg.manifest_path);
+		if (
+			containsPath(root, absolutePath) &&
+			(!currentPackage || root.length > dirname(currentPackage.manifest_path).length)
+		) {
+			currentPackage = pkg;
+		}
+	}
+
+	const crates = new Set<string>();
+	for (const pkg of packages) {
+		if (pkg.id === currentPackage?.id) continue;
+		for (const target of pkg.targets) {
+			if (target.kind.includes("lib")) crates.add(target.name);
+		}
+	}
+	return crates;
+}
+
+function containsInvalidPreludeImport(text: string, repositoryCrates: ReadonlySet<string>): boolean {
+	return [...text.matchAll(PRELUDE_IMPORT)].some((match) => {
+		const root = USE_ROOT.exec(match[0])?.[1];
+		return Boolean(root && repositoryCrates.has(root) && PRELUDE_WORD.test(match[0].replace(PRELUDE_GLOB, "")));
+	});
 }
 
 interface Replacement {
@@ -79,8 +160,12 @@ export default function (pi: ExtensionAPI) {
 
 		if (event.toolName === "edit" && typeof event.input.path === "string" && event.input.path.endsWith(".rs")) {
 			const candidate = await buildEditCandidate(event.input, ctx.cwd);
-			if (candidate === undefined || containsInvalidPreludeImport(candidate)) {
-				return { block: true, reason: PRELUDE_REFUSAL };
+			if (candidate === undefined) return { block: true, reason: PRELUDE_REFUSAL };
+			if (PRELUDE_WORD.test(candidate)) {
+				const repositoryCrates = await getRepositoryCrates(ctx.cwd, event.input.path);
+				if (containsInvalidPreludeImport(candidate, repositoryCrates)) {
+					return { block: true, reason: PRELUDE_REFUSAL };
+				}
 			}
 		}
 
@@ -89,9 +174,12 @@ export default function (pi: ExtensionAPI) {
 			typeof event.input.path === "string" &&
 			event.input.path.endsWith(".rs") &&
 			typeof event.input.content === "string" &&
-			containsInvalidPreludeImport(event.input.content)
+			PRELUDE_WORD.test(event.input.content)
 		) {
-			return { block: true, reason: PRELUDE_REFUSAL };
+			const repositoryCrates = await getRepositoryCrates(ctx.cwd, event.input.path);
+			if (containsInvalidPreludeImport(event.input.content, repositoryCrates)) {
+				return { block: true, reason: PRELUDE_REFUSAL };
+			}
 		}
 
 		if (event.toolName !== "write" || typeof event.input.path !== "string") return undefined;
