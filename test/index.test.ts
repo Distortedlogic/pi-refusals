@@ -118,28 +118,46 @@ test("enforces refusal rules", { timeout: 120_000 }, async (t) => {
 		undefined,
 	);
 
-	const editTool = runner.getToolDefinition("edit");
-	assert.ok(editTool);
-	const executeEdit = (toolCallId: string, path: string, oldText: string, newText: string) =>
-		editTool.execute(
-			toolCallId,
-			{ path, edits: [{ oldText, newText }] },
-			undefined,
-			undefined,
-			runner.createToolContext(toolCallId, undefined),
-		);
-
 	await writeFile(join(workspace, "to-named.rs"), "use crate::prelude::*;\n");
-	await assert.rejects(executeEdit("to-named", "to-named.rs", "*", "Thing"), (error: unknown) => {
-		return error instanceof Error && error.message === preludeRefusal;
-	});
+	assert.deepEqual(
+		await runner.emitToolCall({
+			type: "tool_call",
+			toolCallId: "to-named",
+			toolName: "edit",
+			input: { path: "to-named.rs", edits: [{ oldText: "*", newText: "Thing" }] },
+		}),
+		{ block: true, reason: preludeRefusal },
+	);
 	assert.equal(await readFile(join(workspace, "to-named.rs"), "utf8"), "use crate::prelude::*;\n");
 
 	await writeFile(join(workspace, "to-glob.rs"), "use crate::prelude::Thing;\n");
-	await executeEdit("to-glob", "to-glob.rs", "Thing", "*");
-	assert.equal(await readFile(join(workspace, "to-glob.rs"), "utf8"), "use crate::prelude::*;\n");
+	assert.equal(
+		await runner.emitToolCall({
+			type: "tool_call",
+			toolCallId: "to-glob",
+			toolName: "edit",
+			input: { path: "to-glob.rs", edits: [{ oldText: "Thing", newText: "*" }] },
+		}),
+		undefined,
+	);
+	assert.deepEqual(
+		await runner.emitToolCall({
+			type: "tool_call",
+			toolCallId: "unverifiable",
+			toolName: "edit",
+			input: { path: "to-glob.rs", edits: [{ oldText: "missing", newText: "value" }] },
+		}),
+		{ block: true, reason: preludeRefusal },
+	);
 
 	await writeFile(join(workspace, "ARCH-02.md"), "old");
-	await executeEdit("markdown-edit", "ARCH-02.md", "old", preludeRefusal);
-	assert.equal(await readFile(join(workspace, "ARCH-02.md"), "utf8"), preludeRefusal);
+	assert.equal(
+		await runner.emitToolCall({
+			type: "tool_call",
+			toolCallId: "markdown-edit",
+			toolName: "edit",
+			input: { path: "ARCH-02.md", edits: [{ oldText: "old", newText: preludeRefusal }] },
+		}),
+		undefined,
+	);
 });
