@@ -14,9 +14,10 @@
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"check": "npm run typecheck && npm run lint",
+		"check": "npm run typecheck && npm run lint && npm test",
 		"format": "biome check --write .",
 		"lint": "biome check .",
+		"test": "node --test test/index.test.ts",
 		"typecheck": "tsc --noEmit"
 	},
 	"files": [

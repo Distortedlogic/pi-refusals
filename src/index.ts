@@ -1,6 +1,7 @@
-import { lstat, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, writeFile as fsWriteFile, lstat, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createEditToolDefinition, type EditOperations, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const DISALLOWED_BASH_TOOL = /\b(?:awk|grep|rg|sed)\b/u;
 const PRELUDE_IMPORT = /(?:(?<=^)|(?<=[;\n]))[\t ]*(?:pub(?:\s*\([^)]*\))?\s+)?use\b[^;]*\bprelude\b[^;]*;/gmu;
@@ -15,62 +16,16 @@ function containsInvalidPreludeImport(text: string): boolean {
 	return [...text.matchAll(PRELUDE_IMPORT)].some((match) => /\bprelude\b/u.test(match[0].replace(PRELUDE_GLOB, "")));
 }
 
-type Replacement = { oldText: string; newText: string };
-
-function getReplacements(input: Record<string, unknown>): Replacement[] {
-	const replacements: Replacement[] = [];
-	if (Array.isArray(input.edits)) {
-		for (const edit of input.edits) {
-			if (!edit || typeof edit !== "object" || Array.isArray(edit)) continue;
-			const replacement = edit as Record<string, unknown>;
-			if (typeof replacement.oldText === "string" && typeof replacement.newText === "string") {
-				replacements.push({ oldText: replacement.oldText, newText: replacement.newText });
-			}
+const editOperations: EditOperations = {
+	access: (path) => access(path, constants.R_OK | constants.W_OK),
+	readFile,
+	writeFile: async (path, content) => {
+		if (path.endsWith(".rs") && containsInvalidPreludeImport(content)) {
+			throw new Error(PRELUDE_REFUSAL);
 		}
-	}
-	if (typeof input.oldText === "string" && typeof input.newText === "string") {
-		replacements.push({ oldText: input.oldText, newText: input.newText });
-	}
-	return replacements;
-}
-
-async function editCreatesInvalidPreludeImport(input: Record<string, unknown>, cwd: string): Promise<boolean> {
-	if (typeof input.path !== "string" || !input.path.endsWith(".rs")) return false;
-
-	const replacements = getReplacements(input);
-	if (replacements.length === 0) return false;
-	const invalidAddition = replacements.some(({ newText }) => containsInvalidPreludeImport(newText));
-
-	let content: string;
-	try {
-		content = await readFile(resolve(cwd, input.path), "utf8");
-	} catch {
-		return invalidAddition;
-	}
-	content = content.replace(/^\uFEFF/u, "").replace(/\r\n?/gu, "\n");
-
-	const matches: Array<Replacement & { index: number }> = [];
-	for (const replacement of replacements) {
-		const oldText = replacement.oldText.replace(/\r\n?/gu, "\n");
-		const newText = replacement.newText.replace(/\r\n?/gu, "\n");
-		const index = content.indexOf(oldText);
-		if (oldText.length === 0 || index < 0 || content.indexOf(oldText, index + oldText.length) >= 0) {
-			return invalidAddition;
-		}
-		matches.push({ oldText, newText, index });
-	}
-
-	matches.sort((left, right) => left.index - right.index);
-	for (let index = 1; index < matches.length; index += 1) {
-		const previous = matches[index - 1];
-		if (previous.index + previous.oldText.length > matches[index].index) return invalidAddition;
-	}
-
-	for (const match of matches.toReversed()) {
-		content = `${content.slice(0, match.index)}${match.newText}${content.slice(match.index + match.oldText.length)}`;
-	}
-	return containsInvalidPreludeImport(content);
-}
+		await fsWriteFile(path, content, "utf8");
+	},
+};
 
 async function pathExists(path: string, cwd: string): Promise<boolean> {
 	try {
@@ -82,6 +37,8 @@ async function pathExists(path: string, cwd: string): Promise<boolean> {
 }
 
 export default function (pi: ExtensionAPI) {
+	pi.registerTool(createEditToolDefinition(process.cwd(), { operations: editOperations }));
+
 	pi.on("tool_call", async (event, ctx) => {
 		if (
 			event.toolName === "grep" ||
@@ -93,12 +50,11 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (
-			(event.toolName === "write" &&
-				typeof event.input.path === "string" &&
-				event.input.path.endsWith(".rs") &&
-				typeof event.input.content === "string" &&
-				containsInvalidPreludeImport(event.input.content)) ||
-			(event.toolName === "edit" && (await editCreatesInvalidPreludeImport(event.input, ctx.cwd)))
+			event.toolName === "write" &&
+			typeof event.input.path === "string" &&
+			event.input.path.endsWith(".rs") &&
+			typeof event.input.content === "string" &&
+			containsInvalidPreludeImport(event.input.content)
 		) {
 			return { block: true, reason: PRELUDE_REFUSAL };
 		}
