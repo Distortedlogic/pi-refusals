@@ -6,6 +6,7 @@ Current rules:
 
 - The `write` tool can create a file, but it cannot replace an existing path.
 - The `bash` tool cannot run commands that use `sed` or `awk`.
+- Prelude imports in `write` and `edit` additions must use `::prelude::*`.
 
 ## Install
 

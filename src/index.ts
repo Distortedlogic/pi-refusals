@@ -10,6 +10,10 @@ const DISALLOWED_BASH_TOOLS = new Set(["awk", "sed"]);
 const SHELLS = new Set(["bash", "dash", "ksh", "sh", "zsh"]);
 const DISALLOWED_BASH_TOOL_FALLBACK = /(?:^|[^A-Za-z0-9_-])(?:awk|sed)(?=$|[^A-Za-z0-9_-])/u;
 const BASH_REFUSAL = "Blocked: The system prompt disallows sed and awk. Use the provided tools instead.";
+const PRELUDE_IMPORT = /(?:(?<=^)|(?<=[;\n]))[\t ]*(?:pub(?:\s*\([^)]*\))?\s+)?use\b[^;]*\bprelude\b[^;]*;/gmu;
+const PRELUDE_GLOB = /::\s*prelude\s*::\s*\*/gu;
+const PRELUDE_REFUSAL =
+	"Blocked: The system prompt requires prelude imports to use `::prelude::*` to avoid import churn.";
 const WRITE_REFUSAL =
 	"Blocked: The system prompt says to use write only for new files. Use edit for this existing file.";
 
@@ -44,6 +48,21 @@ function containsDisallowedBashTool(command: string, depth = 0): boolean {
 	return false;
 }
 
+function containsInvalidPreludeImport(text: string): boolean {
+	return [...text.matchAll(PRELUDE_IMPORT)].some((match) => /\bprelude\b/u.test(match[0].replace(PRELUDE_GLOB, "")));
+}
+
+function editAddsInvalidPreludeImport(input: Record<string, unknown>): boolean {
+	if (typeof input.newText === "string" && containsInvalidPreludeImport(input.newText)) return true;
+	if (!Array.isArray(input.edits)) return false;
+
+	return input.edits.some((edit) => {
+		if (!edit || typeof edit !== "object" || Array.isArray(edit)) return false;
+		const newText = (edit as Record<string, unknown>).newText;
+		return typeof newText === "string" && containsInvalidPreludeImport(newText);
+	});
+}
+
 function resolveWritePath(input: string, cwd: string): string {
 	let path = input.replace(UNICODE_SPACES, " ");
 	if (path.startsWith("@")) path = path.slice(1);
@@ -75,6 +94,15 @@ export default function (pi: ExtensionAPI) {
 			containsDisallowedBashTool(event.input.command)
 		) {
 			return { block: true, reason: BASH_REFUSAL };
+		}
+
+		if (
+			(event.toolName === "write" &&
+				typeof event.input.content === "string" &&
+				containsInvalidPreludeImport(event.input.content)) ||
+			(event.toolName === "edit" && editAddsInvalidPreludeImport(event.input))
+		) {
+			return { block: true, reason: PRELUDE_REFUSAL };
 		}
 
 		if (event.toolName !== "write" || typeof event.input.path !== "string") return undefined;
