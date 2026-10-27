@@ -2,26 +2,28 @@ import { lstat } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const DISALLOWED_BASH_TOOL = /\b(?:awk|sed)\b/u;
-const PRELUDE_GLOB = "::prelude::*";
-const BASH_REFUSAL = "Blocked: The system prompt disallows sed and awk. Use the provided tools instead.";
+const DISALLOWED_BASH_TOOL = /\b(?:awk|grep|rg|sed)\b/u;
+const PRELUDE_IMPORT = /(?:(?<=^)|(?<=[;\n]))[\t ]*(?:pub(?:\s*\([^)]*\))?\s+)?use\b[^;]*\bprelude\b[^;]*;/gmu;
+const PRELUDE_GLOB = /::\s*prelude\s*::\s*\*/gu;
+const COMMAND_REFUSAL = "Blocked: The system prompt disallows sed, awk, rg, and grep. Use an allowed tool instead.";
 const PRELUDE_REFUSAL =
-	"Blocked: The system prompt requires prelude imports to use `::prelude::*` to avoid import churn.";
+	"Blocked: The system prompt requires Rust prelude imports to use `::prelude::*` to avoid import churn.";
 const WRITE_REFUSAL =
 	"Blocked: The system prompt says to use write only for new files. Use edit for this existing file.";
 
-function containsInvalidPrelude(text: string): boolean {
-	return text.replaceAll(PRELUDE_GLOB, "").includes("prelude");
+function containsInvalidPreludeImport(text: string): boolean {
+	return [...text.matchAll(PRELUDE_IMPORT)].some((match) => /\bprelude\b/u.test(match[0].replace(PRELUDE_GLOB, "")));
 }
 
-function editAddsInvalidPrelude(input: Record<string, unknown>): boolean {
-	if (typeof input.newText === "string" && containsInvalidPrelude(input.newText)) return true;
+function editAddsInvalidPreludeImport(input: Record<string, unknown>): boolean {
+	if (typeof input.path !== "string" || !input.path.endsWith(".rs")) return false;
+	if (typeof input.newText === "string" && containsInvalidPreludeImport(input.newText)) return true;
 	if (!Array.isArray(input.edits)) return false;
 
 	return input.edits.some((edit) => {
 		if (!edit || typeof edit !== "object" || Array.isArray(edit)) return false;
 		const newText = (edit as Record<string, unknown>).newText;
-		return typeof newText === "string" && containsInvalidPrelude(newText);
+		return typeof newText === "string" && containsInvalidPreludeImport(newText);
 	});
 }
 
@@ -37,18 +39,21 @@ async function pathExists(path: string, cwd: string): Promise<boolean> {
 export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
 		if (
-			event.toolName === "bash" &&
-			typeof event.input.command === "string" &&
-			DISALLOWED_BASH_TOOL.test(event.input.command)
+			event.toolName === "grep" ||
+			(event.toolName === "bash" &&
+				typeof event.input.command === "string" &&
+				DISALLOWED_BASH_TOOL.test(event.input.command))
 		) {
-			return { block: true, reason: BASH_REFUSAL };
+			return { block: true, reason: COMMAND_REFUSAL };
 		}
 
 		if (
 			(event.toolName === "write" &&
+				typeof event.input.path === "string" &&
+				event.input.path.endsWith(".rs") &&
 				typeof event.input.content === "string" &&
-				containsInvalidPrelude(event.input.content)) ||
-			(event.toolName === "edit" && editAddsInvalidPrelude(event.input))
+				containsInvalidPreludeImport(event.input.content)) ||
+			(event.toolName === "edit" && editAddsInvalidPreludeImport(event.input))
 		) {
 			return { block: true, reason: PRELUDE_REFUSAL };
 		}
