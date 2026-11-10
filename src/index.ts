@@ -148,7 +148,25 @@ async function pathExists(path: string, cwd: string): Promise<boolean> {
 }
 
 export default function (pi: ExtensionAPI) {
+	let enabled = true;
+
+	pi.registerCommand("refusals", {
+		description: "Turn the refusal rules on or off: /refusals [on|off]",
+		getArgumentCompletions: (prefix) =>
+			["on", "off"].filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value })),
+		handler: async (args, ctx) => {
+			const choice = args.trim();
+			if (choice !== "" && choice !== "on" && choice !== "off") {
+				ctx.ui.notify("Usage: /refusals [on|off]", "warning");
+				return;
+			}
+			enabled = choice === "" ? !enabled : choice === "on";
+			ctx.ui.notify(`Refusals ${enabled ? "on" : "off"}`, "info");
+		},
+	});
+
 	pi.on("tool_call", async (event, ctx) => {
+		if (!enabled) return undefined;
 		if (
 			event.toolName === "grep" ||
 			(event.toolName === "bash" &&

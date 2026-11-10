@@ -212,4 +212,19 @@ test("enforces refusal rules", { timeout: 120_000 }, async (t) => {
 		}),
 		undefined,
 	);
+
+	const refusals = runner.getCommand("refusals");
+	assert.ok(refusals);
+	const sedCall = {
+		type: "tool_call",
+		toolCallId: "toggle",
+		toolName: "bash",
+		input: { command: "sed -n 1p file" },
+	} as const;
+	await refusals.handler("off", runner.createCommandContext());
+	assert.equal(await runner.emitToolCall(sedCall), undefined);
+	await refusals.handler("on", runner.createCommandContext());
+	assert.deepEqual(await runner.emitToolCall(sedCall), { block: true, reason: commandRefusal });
+	await refusals.handler("", runner.createCommandContext());
+	assert.equal(await runner.emitToolCall(sedCall), undefined);
 });
